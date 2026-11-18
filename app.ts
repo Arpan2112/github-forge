@@ -135,6 +135,11 @@ async function route(forge: Forge, req: IncomingMessage, res: ServerResponse, re
       host: req.headers.host ?? 'localhost',
     });
     const headers: Record<string, string> = { 'x-github-request-id': requestId, ...(result.headers ?? {}) };
+    if (result.rawText !== undefined) {
+      res.writeHead(result.status, { 'content-type': JSON_TYPE, 'content-length': Buffer.byteLength(result.rawText), ...headers });
+      res.end(result.rawText);
+      return;
+    }
     if (result.status === 204 || result.body === undefined) {
       res.writeHead(result.status, headers);
       res.end();

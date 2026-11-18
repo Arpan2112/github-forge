@@ -53,6 +53,10 @@ export interface IssueState {
   closedAt: string | null;
   /** GraphQL kind: an issue and a pull request are different node types over one number space. */
   isPullRequest: false;
+  /** Representation revision: raised by every mutation that can change the REST issue DTO. */
+  revision: number;
+  /** The serialised GET body for (revision, labelsRevision), rebuilt lazily; see rest.ts issueText. */
+  cachedText?: { revision: number; labelsRevision: number; text: string };
 }
 
 export interface PullState {
@@ -90,6 +94,8 @@ export class Repo {
   readonly packCache = new Map<string, { pack: Buffer; shallowInfo: string[] }>();
   /** Issues and pull requests share one number sequence, as on GitHub. */
   nextNumber = 1;
+  /** Raised whenever the label set changes: label definitions are embedded in issue DTOs. */
+  labelsRevision = 0;
   nextCommentId = 1;
 
   readonly id: number;
