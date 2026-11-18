@@ -43,8 +43,6 @@ export interface ApiRequest {
 export interface ApiResponse {
   status: number;
   body?: unknown;
-  /** A pre-serialised JSON body (already newline-terminated), sent verbatim when present. */
-  rawText?: string;
   headers?: Record<string, string>;
 }
 
@@ -130,25 +128,6 @@ export function issueJson(repo: Repo, issue: IssueState): Record<string, unknown
     html_url: `https://github.com/${repo.fullName}/issues/${issue.number}`,
     url: `/api/v3/repos/${repo.fullName}/issues/${issue.number}`,
   };
-}
-
-/**
- * The serialised GET body for one issue, cached on the issue itself. The DTO depends only on
- * the issue's own fields (guarded by issue.revision, raised at every mutation site in rest.ts
- * and graphql.ts) and on the repository's label definitions (guarded by repo.labelsRevision),
- * so a cached body can never go stale. Bodies over the cap are served uncached.
- */
-const ISSUE_TEXT_MAX_BYTES = 256 * 1024;
-export function issueText(repo: Repo, issue: IssueState): string {
-  const cached = issue.cachedText;
-  if (cached !== undefined && cached.revision === issue.revision && cached.labelsRevision === repo.labelsRevision) {
-    return cached.text;
-  }
-  const text = `${JSON.stringify(issueJson(repo, issue))}\n`;
-  if (Buffer.byteLength(text) <= ISSUE_TEXT_MAX_BYTES) {
-    issue.cachedText = { revision: issue.revision, labelsRevision: repo.labelsRevision, text };
-  }
-  return text;
 }
 
 /** A pull request rendered as an issue (GitHub's REST issue list includes pull requests). */
@@ -471,7 +450,6 @@ function handleRepo(forge: Forge, repo: Repo, rest: string[], request: ApiReques
       if (name === undefined || name === '') return unprocessable('name is required');
       if (repo.labels.has(name)) return unprocessable('Validation Failed: name has already been taken');
       repo.labels.set(name, { name, color: (str(body.color) ?? 'ededed').replace(/^#/, ''), description: str(body.description) ?? null });
-      repo.labelsRevision += 1;
       return { status: 201, body: labelJson(repo, name) };
     }
     return notFound();
@@ -694,7 +672,6 @@ function handleIssues(forge: Forge, repo: Repo, rest: string[], request: ApiRequ
         updatedAt: now,
         closedAt: null,
         isPullRequest: false,
-        revision: 0,
       };
       repo.nextNumber += 1;
       repo.issues.set(issue.number, issue);
@@ -732,7 +709,7 @@ function handleIssues(forge: Forge, repo: Repo, rest: string[], request: ApiRequ
 
   if (rest.length === 1) {
     if (method === 'GET') {
-      if (issue !== undefined) return { status: 200, rawText: issueText(repo, issue) };
+      if (issue !== undefined) return { status: 200, body: issueJson(repo, issue) };
       if (pull !== undefined) return { status: 200, body: pullAsIssueJson(repo, pull) };
       return notFound();
     }
@@ -740,7 +717,6 @@ function handleIssues(forge: Forge, repo: Repo, rest: string[], request: ApiRequ
       const body = parseBody(request);
       if (isError(body)) return body;
       if (issue !== undefined) {
-        issue.revision += 1;
         const title = str(body.title);
         if (title !== undefined) issue.title = title;
         const text = str(body.body);
@@ -798,7 +774,6 @@ function handleIssues(forge: Forge, repo: Repo, rest: string[], request: ApiRequ
       const comment = { id: repo.nextCommentId, body: text, createdAt: forge.nowIso() };
       repo.nextCommentId += 1;
       issue.comments.push(comment);
-      issue.revision += 1;
       issue.updatedAt = comment.createdAt;
       void comments;
       return { status: 201, body: commentJson(repo, issue.number, comment) };

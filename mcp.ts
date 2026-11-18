@@ -162,7 +162,6 @@ function callTool(forge: Forge, name: string, rawArgs: unknown): Record<string, 
         updatedAt: now,
         closedAt: null,
         isPullRequest: false,
-        revision: 0,
       };
       repo.nextNumber += 1;
       repo.issues.set(issue.number, issue);

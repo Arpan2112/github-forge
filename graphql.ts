@@ -795,7 +795,6 @@ const resolvers: Record<string, Record<string, (ctx: Ctx, source: Source, args: 
         updatedAt: now,
         closedAt: null,
         isPullRequest: false,
-        revision: 0,
       };
       repo.nextNumber += 1;
       repo.issues.set(issue.number, issue);
@@ -811,7 +810,6 @@ const resolvers: Record<string, Record<string, (ctx: Ctx, source: Source, args: 
       issue.state = 'closed';
       issue.closedAt = ctx.forge.nowIso();
       issue.updatedAt = issue.closedAt;
-      issue.revision += 1;
       return { __typename: 'CloseIssuePayload', issue: issueSource(repo, issue), clientMutationId: (input.clientMutationId as string) ?? null };
     },
     createPullRequest: (ctx, _s, args) => {
@@ -864,10 +862,7 @@ const resolvers: Record<string, Record<string, (ctx: Ctx, source: Source, args: 
       const now = ctx.forge.nowIso();
       const comment = { id: repo.nextCommentId, body, createdAt: now };
       repo.nextCommentId += 1;
-      if (issue !== undefined) {
-        issue.comments.push(comment);
-        issue.revision += 1;
-      }
+      if (issue !== undefined) issue.comments.push(comment);
       const node: Source = {
         __typename: 'IssueComment',
         id: commentGid(repo, number, comment.id),
