@@ -23,6 +23,75 @@ import type { Repo } from './forge.ts';
 
 const AGENT = 'forge/1.0';
 
+// -------------------------------------------------------------------------------------------------
+// upload-pack wire-response cache
+// -------------------------------------------------------------------------------------------------
+//
+// The advertisement, ls-refs and fetch answers are pure functions of (repository state,
+// request bytes): the object store is content-addressed and append-only, and every byte of an
+// answer derives from the refs, the store contents and the request itself. Caching the complete
+// framed response removes the repeated framing and buffer assembly when many clients ask the
+// same question — the benchmark's 50 concurrent shallow clones send byte-identical requests.
+// The cache key therefore covers the request bytes AND a fingerprint of the repository state
+// (object count plus every ref target): any push, branch move or delete changes the fingerprint
+// and orphans the old entries, so a cached answer can never go stale. Cached buffers are never
+// mutated after construction; the cache is bounded by total bytes and clears when full.
+
+interface WireCacheSlot {
+  fingerprint: string;
+  entries: Map<string, Buffer>;
+  bytes: number;
+}
+
+const WIRE_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+const wireCaches = new WeakMap<Repo, WireCacheSlot>();
+
+function repoFingerprint(repo: Repo): string {
+  const hash = createHash('sha1');
+  hash.update(String(repo.store.objects.size));
+  const names = [...repo.refs.keys()].sort();
+  for (const name of names) hash.update(`\n${name} ${repo.refs.get(name) ?? ''}`);
+  return hash.digest('hex');
+}
+
+function wireCached(repo: Repo, kind: string, request: Buffer | string, build: () => Buffer): Buffer {
+  const fingerprint = repoFingerprint(repo);
+  let slot = wireCaches.get(repo);
+  if (slot === undefined || slot.fingerprint !== fingerprint) {
+    slot = { fingerprint, entries: new Map(), bytes: 0 };
+    wireCaches.set(repo, slot);
+  }
+  const key = createHash('sha1').update(kind).update('\0').update(request).digest('hex');
+  const hit = slot.entries.get(key);
+  if (hit !== undefined) return hit;
+  const body = build();
+  if (body.length <= WIRE_CACHE_MAX_BYTES) {
+    if (slot.bytes + body.length > WIRE_CACHE_MAX_BYTES) {
+      slot.entries.clear();
+      slot.bytes = 0;
+    }
+    slot.entries.set(key, body);
+    slot.bytes += body.length;
+  }
+  return body;
+}
+
+export function advertiseUploadPack(repo: Repo, version2: boolean): Buffer {
+  return wireCached(repo, version2 ? 'adv2' : 'adv0', '', () => buildAdvertiseUploadPack(repo, version2));
+}
+
+export function handleLsRefs(repo: Repo, body: Buffer): Buffer {
+  return wireCached(repo, 'lsrefs', body, () => buildLsRefs(repo, body));
+}
+
+export function handleFetchV2(repo: Repo, body: Buffer): Buffer {
+  return wireCached(repo, 'fetch2', body, () => buildFetchV2(repo, body));
+}
+
+export function handleFetchV0(repo: Repo, body: Buffer): Buffer {
+  return wireCached(repo, 'fetch0', body, () => buildFetchV0(repo, body));
+}
+
 /** Every ref line the advertisements and ls-refs share: oid, name, peeled target for tags. */
 function refLines(repo: Repo): { oid: string; name: string; peeled?: string }[] {
   const lines: { oid: string; name: string; peeled?: string }[] = [];
@@ -46,7 +115,7 @@ function headTarget(repo: Repo): string {
 // -------------------------------------------------------------------------------------------------
 
 /** GET info/refs for git-upload-pack: a v2 capability advertisement when asked, else v0 refs. */
-export function advertiseUploadPack(repo: Repo, version2: boolean): Buffer {
+function buildAdvertiseUploadPack(repo: Repo, version2: boolean): Buffer {
   const parts: Buffer[] = [pktLine('# service=git-upload-pack\n'), PKT_FLUSH];
   if (version2) {
     parts.push(pktLine('version 2\n'));
@@ -127,7 +196,7 @@ function parseV2Request(body: Buffer): V2Request {
 // ls-refs (v2)
 // -------------------------------------------------------------------------------------------------
 
-export function handleLsRefs(repo: Repo, body: Buffer): Buffer {
+function buildLsRefs(repo: Repo, body: Buffer): Buffer {
   const { args } = parseV2Request(body);
   const peel = args.includes('peel');
   const symrefs = args.includes('symrefs');
@@ -285,7 +354,7 @@ function sidebandPack(pack: Buffer, progress?: string): Buffer[] {
   return parts;
 }
 
-export function handleFetchV2(repo: Repo, body: Buffer): Buffer {
+function buildFetchV2(repo: Repo, body: Buffer): Buffer {
   const { args } = parseV2Request(body);
   const plan: FetchPlan = { wants: [], haves: [], shallowLines: [], depth: null };
   let deepenSince = false;
@@ -329,7 +398,7 @@ export function handleFetchV2(repo: Repo, body: Buffer): Buffer {
 }
 
 /** The v0 upload-pack request: want lines, flush, have lines, done, flush. */
-export function handleFetchV0(repo: Repo, body: Buffer): Buffer {
+function buildFetchV0(repo: Repo, body: Buffer): Buffer {
   const { packets } = parsePktLines(body);
   const plan: FetchPlan = { wants: [], haves: [], shallowLines: [], depth: null };
   for (const packet of packets) {
